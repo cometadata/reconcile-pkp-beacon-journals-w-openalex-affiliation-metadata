@@ -33,7 +33,7 @@ use std::process::Command as WinCommand;
 #[derive(Parser)]
 #[command(name = "Get OpenAlex works with PKP Beacon base URL")]
 #[command(about = "Filters OpenAlex JSONL.gz files based on locations[].landing_page_url matching ANY URL in a CSV and *at least one non-empty* authorships[].raw_affiliation_strings, organizing by DOI prefix.")]
-#[command(version = "1.0.0")]
+#[command(version = "1.1.0")]
 struct Cli {
     #[arg(short, long, help = "Directory containing input JSONL.gz files", required = true)]
     input_dir: String,
@@ -55,6 +55,12 @@ struct Cli {
 
     #[arg(short, long, default_value = "60", help = "Interval in seconds to log statistics")]
     stats_interval: u64,
+
+    #[arg(long, default_value = "6", help = "GZIP compression level for output files (0-9)")]
+    compression_level: u32,
+
+    #[arg(long, default_value = "8", help = "Output file writer buffer size in KB")]
+    writer_buffer_kb: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -146,12 +152,9 @@ fn find_gz_files_excluding_csv_gz<P: AsRef<Path>>(directory: P) -> Result<Vec<Pa
         .filter_map(Result::ok)
         .filter(|path| path.is_file())
         .filter(|path| {
-            if let Some(filename_osstr) = path.file_name() {
-                if let Some(filename_str) = filename_osstr.to_str() {
-                    return !filename_str.ends_with(".csv.gz");
-                }
-            }
-            false
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map_or(false, |name_str| !name_str.ends_with(".csv.gz"))
         })
         .collect();
 
@@ -220,10 +223,12 @@ fn check_location_url_match_any(locations: Option<&Vec<Location>>, base_urls: &[
     };
 
     let mut found_any_landing_page = false;
-    let mut found_match = false;
 
     for location in locations_vec {
         if let Some(landing_url_str) = location.landing_page_url.as_deref() {
+            if landing_url_str.is_empty() {
+                continue;
+            }
             found_any_landing_page = true;
             match Url::parse(landing_url_str) {
                 Ok(landing_url) => {
@@ -231,37 +236,27 @@ fn check_location_url_match_any(locations: Option<&Vec<Location>>, base_urls: &[
                     let record_host = landing_url.host_str();
                     let record_port = landing_url.port_or_known_default();
 
-                    for base_url in base_urls {
-                        let scheme_match = record_scheme == base_url.scheme();
-                        let host_match = record_host == base_url.host_str();
-                        let port_match = record_port == base_url.port_or_known_default();
-
-                        if scheme_match && host_match && port_match {
-                            found_match = true;
-                            break;
-                        }
+                    if base_urls.iter().any(|base_url| {
+                        record_scheme == base_url.scheme() &&
+                        record_host == base_url.host_str() &&
+                        record_port == base_url.port_or_known_default()
+                    }) {
+                        return true;
                     }
                 }
                 Err(_e) => {
                     stats.url_landing_page_parse_errors.fetch_add(1, Ordering::Relaxed);
                 }
             }
-            if found_match {
-                break;
-            }
         }
     }
 
-    if found_match {
-        true
+    if !found_any_landing_page {
+        stats.url_landing_page_missing.fetch_add(1, Ordering::Relaxed);
     } else {
-        if !found_any_landing_page {
-            stats.url_landing_page_missing.fetch_add(1, Ordering::Relaxed);
-        } else {
-            stats.url_no_match.fetch_add(1, Ordering::Relaxed);
-        }
-        false
+        stats.url_no_match.fetch_add(1, Ordering::Relaxed);
     }
+    false
 }
 
 
@@ -271,7 +266,7 @@ fn check_any_affiliation_string_present(authorships: Option<&Vec<Authorship>>, s
             for author in auths {
                 match author.raw_affiliation_strings.as_deref() {
                     Some(raw_strings) => {
-                        if !raw_strings.is_empty() {
+                        if raw_strings.iter().any(|s| !s.trim().is_empty()) {
                             return true;
                         }
                     }
@@ -294,60 +289,42 @@ fn check_any_affiliation_string_present(authorships: Option<&Vec<Authorship>>, s
 fn extract_doi_prefix(record: &OpenAlexRecord) -> Option<DoiPrefix> {
     record.doi.as_ref().and_then(|doi_str| {
         let cleaned_doi_str = doi_str.trim();
+        if cleaned_doi_str.is_empty() { return None; }
 
-        let doi_start_index = cleaned_doi_str.rfind("10.").and_then(|idx| {
-            if idx == 0 {
-                Some(idx)
-            } else {
-                match cleaned_doi_str.chars().nth(idx.saturating_sub(1)) {
-                    Some('/') | Some(':') | Some(' ') => Some(idx),
-                    _ => {
-                        Some(idx)
-                    }
-                }
-            }
+        let doi_start_index = cleaned_doi_str.rfind("10.").filter(|&idx| {
+            if cleaned_doi_str.len() > idx + 3 {
+                cleaned_doi_str.chars().nth(idx + 3).map_or(false, |c| c.is_digit(10) || c == '/')
+            } else { true }
         });
-
 
         doi_start_index.and_then(|start_index| {
             let potential_doi_part = &cleaned_doi_str[start_index..];
-
-            potential_doi_part.split_once('/').and_then(|(pfx, _)| {
-                let trimmed_pfx = pfx.trim();
-                    if !trimmed_pfx.is_empty() && trimmed_pfx.starts_with("10.") && trimmed_pfx.len() > 3 {
-                        Some(DoiPrefix(trimmed_pfx.to_string()))
-                } else {
-                    warn!("Extracted DOI prefix '{}' from '{}' seems invalid after split (too short or empty), classifying as unknown.", trimmed_pfx, doi_str);
-                    None
-                }
-            })
-            .or_else(|| {
-                let trimmed_pfx = potential_doi_part.trim();
-                    if !trimmed_pfx.is_empty() && trimmed_pfx.starts_with("10.") && trimmed_pfx.len() > 3 {
-                    info!("DOI string '{}' appears to contain only the prefix '{}'. Using it.", doi_str, trimmed_pfx);
-                    Some(DoiPrefix(trimmed_pfx.to_string()))
-                } else {
-                    warn!("Could not find '/' after '10.' in DOI string '{}' and remaining part invalid, classifying as unknown.", doi_str);
-                    None
-                }
+            potential_doi_part.split_once('/').map(|(pfx, _)| pfx.trim())
+                .or_else(|| {
+                    if potential_doi_part.contains('/') { None }
+                    else { Some(potential_doi_part.trim()) }
                 })
+                .filter(|pfx_str| !pfx_str.is_empty() && pfx_str.starts_with("10.") && pfx_str.len() > 3)
+                .map(|valid_pfx_str| DoiPrefix(valid_pfx_str.to_string()))
         })
         .or_else(|| {
-                if !cleaned_doi_str.is_empty() {
-                    warn!("Could not find '10.' marker in non-empty DOI string '{}', classifying as unknown.", doi_str);
-                }
-                None
+            warn!("Could not extract a valid DOI prefix from DOI string: '{}'. Classifying as unknown.", doi_str);
+            None
         })
     })
 }
 
+type WriterType = BufWriter<GzEncoder<File>>;
+
 struct PrefixWriterManager {
     base_output_dir: PathBuf,
     max_open: usize,
-    writers: Mutex<HashMap<DoiPrefix, BufWriter<GzEncoder<File>>>>,
+    writers: Mutex<HashMap<DoiPrefix, WriterType>>,
     lru: Mutex<VecDeque<DoiPrefix>>,
     created_dirs: Mutex<HashSet<PathBuf>>,
     stats: Arc<Stats>,
+    compression_level: Compression,
+    writer_buffer_kb: usize,
 }
 
 impl PrefixWriterManager {
@@ -355,6 +332,8 @@ impl PrefixWriterManager {
         base_output_dir: PathBuf,
         max_open: usize,
         stats: Arc<Stats>,
+        compression_level: u32,
+        writer_buffer_kb: usize,
     ) -> Result<Self> {
         Ok(Self {
             base_output_dir,
@@ -363,113 +342,132 @@ impl PrefixWriterManager {
             lru: Mutex::new(VecDeque::new()),
             created_dirs: Mutex::new(HashSet::new()),
             stats,
+            compression_level: Compression::new(compression_level.clamp(0, 9)),
+            writer_buffer_kb,
         })
     }
 
-    fn close_writer(prefix: &DoiPrefix, writer: BufWriter<GzEncoder<File>>) -> Option<String> {
-
+    fn close_writer(prefix: &DoiPrefix, writer: WriterType) -> Result<(), String> {
         debug!("Attempting to close writer for prefix {}", prefix.0);
         match writer.into_inner() {
             Ok(gz_encoder) => {
-                debug!("Successfully flushed BufWriter for prefix {}. Finishing GzEncoder...", prefix.0);
+                debug!("Successfully flushed BufWriter for {}. Finishing GzEncoder...", prefix.0);
                 match gz_encoder.finish() {
                     Ok(_file) => {
                         debug!("Successfully finished GZ stream and closed file for prefix {}", prefix.0);
-                        None
+                        Ok(())
                     }
-                    Err(e) => {
-                        let msg = format!("I/O Error finishing GZ stream for prefix {}: {}", prefix.0, e);
-                        error!("{}", msg);
-                        Some(msg)
-                    }
+                    Err(e) => Err(format!("I/O Error finishing GZ stream for prefix {}: {}", prefix.0, e)),
                 }
             }
-            Err(into_inner_err) => {
-                let msg = format!("Error flushing BufWriter for prefix {} on close: {}", prefix.0, into_inner_err);
-                error!("{}", msg);
-                Some(msg)
+            Err(into_inner_err) => Err(format!("Error flushing BufWriter for prefix {} on close: {}", prefix.0, into_inner_err.error())),
+        }
+    }
+    
+    fn create_file_writer_for_prefix(&self, prefix: &DoiPrefix) -> Result<WriterType> {
+        let prefix_dir = self.base_output_dir.join(&prefix.0);
+
+        let mut created_dirs_guard = self.created_dirs.lock().unwrap();
+        if !created_dirs_guard.contains(&prefix_dir) {
+            drop(created_dirs_guard);
+            fs::create_dir_all(&prefix_dir)
+                .with_context(|| format!("Failed to create output directory {}", prefix_dir.display()))?;
+            self.created_dirs.lock().unwrap().insert(prefix_dir.clone());
+        }
+
+        let final_file_path = prefix_dir.join("data.jsonl.gz");
+        let file_exists = final_file_path.exists();
+
+        let file = OpenOptions::new().write(true).create(true).append(true).open(&final_file_path)
+            .with_context(|| format!("Failed to open/create output file: {}", final_file_path.display()))?;
+
+        debug!("IO: Opened output file{} for prefix {} (new writer instance): {}", if file_exists { " (appending)" } else { " (new)" }, prefix.0, final_file_path.display());
+
+        let gz_encoder = GzEncoder::new(file, self.compression_level);
+        Ok(BufWriter::with_capacity(self.writer_buffer_kb * 1024, gz_encoder))
+    }
+
+    fn touch_lru(lru_queue: &mut VecDeque<DoiPrefix>, prefix: &DoiPrefix, max_size: usize) {
+        if lru_queue.front() != Some(prefix) {
+            if let Some(pos) = lru_queue.iter().position(|id| id == prefix) {
+                let id = lru_queue.remove(pos).expect("Prefix was in LRU, so remove should succeed");
+                lru_queue.push_front(id);
+            } else {
+                lru_queue.push_front(prefix.clone());
+                while lru_queue.len() > max_size {
+                    lru_queue.pop_back();
+                }
             }
         }
     }
 
 
     fn write_line(&self, prefix: &DoiPrefix, line_bytes: &[u8]) -> Result<()> {
-        let mut writers_guard = self.writers.lock().unwrap();
-        let mut lru_guard = self.lru.lock().unwrap();
+        {
+            let mut writers_guard = self.writers.lock().unwrap();
+            if writers_guard.contains_key(prefix) {
+                let writer = writers_guard.get_mut(prefix).unwrap();
+                let mut lru_guard = self.lru.lock().unwrap();
+                Self::touch_lru(&mut lru_guard, prefix, self.max_open);
+                drop(lru_guard);
 
-        let was_present = writers_guard.contains_key(prefix);
-
-        if !was_present && writers_guard.len() >= self.max_open {
-            while writers_guard.len() >= self.max_open {
-                if let Some(evict_prefix) = lru_guard.pop_back() {
-                    debug!("Evicting prefix writer for {}", evict_prefix.0);
-                    if let Some(writer_to_close) = writers_guard.remove(&evict_prefix) {
-                        drop(lru_guard);
-                        drop(writers_guard);
-
-                        Self::close_writer(&evict_prefix, writer_to_close);
-
-                        writers_guard = self.writers.lock().unwrap();
-                        lru_guard = self.lru.lock().unwrap();
-                    } else {
-                        warn!("LRU contained evicted prefix {} but it wasn't in the writers map. Inconsistency?", evict_prefix.0);
-                    }
-                } else {
-                    error!("LRU queue is empty while trying to evict, but writers map is full ({} writers, max {}). Cannot evict.", writers_guard.len(), self.max_open);
-                    break;
+                writer.write_all(line_bytes)?;
+                if !line_bytes.ends_with(b"\n") {
+                    writer.write_all(b"\n")?;
                 }
+                return Ok(());
             }
         }
 
-        let writer = writers_guard.entry(prefix.clone()).or_insert_with(|| {
-            let prefix_dir = self.base_output_dir.join(&prefix.0);
-            {
-                let mut created_dirs_guard = self.created_dirs.lock().unwrap();
-                if !created_dirs_guard.contains(&prefix_dir) {
-                    drop(created_dirs_guard);
-                    match fs::create_dir_all(&prefix_dir) {
-                        Ok(_) => {
-                                debug!("Created output directory: {}", prefix_dir.display());
-                                self.created_dirs.lock().unwrap().insert(prefix_dir.clone());
-                            },
-                        Err(e) => {
-                                error!("Failed to create output directory {}: {}", prefix_dir.display(), e);
-                            }
-                    }
-                }
+        let new_physical_writer = match self.create_file_writer_for_prefix(prefix) {
+            Ok(writer) => writer,
+            Err(e) => {
+                error!("Failed to create physical file writer for prefix {}: {}. Line will be dropped for this prefix.", prefix.0, e);
+                return Err(e);
             }
+        };
 
-            let final_file_path = prefix_dir.join("data.jsonl.gz");
-            let file_exists = final_file_path.exists();
+        let mut writers_guard = self.writers.lock().unwrap();
+        let mut lru_guard = self.lru.lock().unwrap();
 
-            let file = OpenOptions::new().write(true).create(true).append(true).open(&final_file_path)
-                .with_context(|| format!("Failed to open/create output file: {}", final_file_path.display()))
-                .expect("CRITICAL: Failed to open/create output file");
+        if writers_guard.contains_key(prefix) {
+            debug!("Race detected: Writer for {} created by another thread. Closing our redundant new file writer.", prefix.0);
+            drop(lru_guard);
+            drop(writers_guard);
 
-            debug!("Opened output file{} {}", if file_exists { " (appending)" } else { " (new)" }, final_file_path.display());
-
-            self.stats.prefix_files_opened.fetch_add(1, Ordering::Relaxed);
-            self.stats.unique_prefixes_written.lock().unwrap().insert(prefix.clone());
-
-            lru_guard.push_front(prefix.clone());
-
-            let gz_encoder = GzEncoder::new(file, Compression::default());
-            BufWriter::new(gz_encoder)
-        });
-
-        if was_present {
-                if lru_guard.front() != Some(prefix) {
-                    if let Some(pos) = lru_guard.iter().position(|id| id == prefix) {
-                        let id = lru_guard.remove(pos).unwrap();
-                        lru_guard.push_front(id);
-                    } else {
-                        warn!("Prefix {} writer existed but wasn't in LRU queue? Adding it to front.", prefix.0);
-                        lru_guard.push_front(prefix.clone());
-                    }
-                }
+            if let Err(e) = Self::close_writer(prefix, new_physical_writer) {
+                 error!("Error closing redundant new file writer for {}: {}", prefix.0, e);
             }
+            debug!("Re-calling write_line for prefix {} after race.", prefix.0);
+            return self.write_line(prefix, line_bytes);
+        }
 
+        while writers_guard.len() >= self.max_open {
+            if let Some(evict_prefix) = lru_guard.pop_back() {
+                debug!("Cache full. Evicting prefix writer for {} (to make space for {})", evict_prefix.0, prefix.0);
+                if let Some(writer_to_close) = writers_guard.remove(&evict_prefix) {
+                    if let Err(e) = Self::close_writer(&evict_prefix, writer_to_close) {
+                        error!("Failed to close evicted writer for {}: {}", evict_prefix.0, e);
+                    }
+                } else {
+                    warn!("LRU contained {} for eviction, but it wasn't in writers map. (Race with another eviction?)", evict_prefix.0);
+                }
+            } else {
+                error!("LRU queue empty during commit-time eviction, but writers map full ({}). Cannot make space for {}.", writers_guard.len(), prefix.0);
+                return Err(anyhow!("Cannot evict writer to make space for new prefix {}, LRU empty but cache full.", prefix.0));
+            }
+        }
 
+        self.stats.prefix_files_opened.fetch_add(1, Ordering::Relaxed);
+        if self.stats.unique_prefixes_written.lock().unwrap().insert(prefix.clone()) {
+             debug!("Tracking new unique prefix (commit phase): {}", prefix.0);
+        }
+        
+        writers_guard.insert(prefix.clone(), new_physical_writer);
+        lru_guard.push_front(prefix.clone());
+
+        let writer = writers_guard.get_mut(prefix).expect("Writer just inserted should be present");
+        
         writer.write_all(line_bytes)?;
         if !line_bytes.ends_with(b"\n") {
             writer.write_all(b"\n")?;
@@ -479,50 +477,56 @@ impl PrefixWriterManager {
     }
 
     fn flush_all(&self) -> Result<()> {
-        info!("Flushing all open prefix writers...");
+        info!("Flushing all open prefix writers explicitly...");
         let mut writers_guard = self.writers.lock().unwrap();
         let mut lru_guard = self.lru.lock().unwrap();
-        let mut errors: Vec<String> = Vec::new();
+        let mut error_messages: Vec<String> = Vec::new();
 
         for (prefix, writer) in writers_guard.drain() {
-                debug!("Flushing and closing writer for prefix: {}", prefix.0);
-                if let Some(err_msg) = Self::close_writer(&prefix, writer) {
-                    errors.push(err_msg);
-                }
+            debug!("Flushing and closing writer for prefix: {}", prefix.0);
+            if let Err(err_msg) = Self::close_writer(&prefix, writer) {
+                error!("Error closing writer for prefix {}: {}", prefix.0, err_msg);
+                error_messages.push(format!("Prefix {}: {}", prefix.0, err_msg));
+            }
         }
         lru_guard.clear();
 
-        if errors.is_empty() {
-            info!("All prefix writers flushed and closed successfully.");
+        if error_messages.is_empty() {
+            info!("All prefix writers flushed and closed successfully via flush_all().");
             Ok(())
         } else {
-            Err(anyhow::anyhow!("Errors occurred during final prefix writer flush/close:\n - {}", errors.join("\n - ")))
+            Err(anyhow!("Errors occurred during final prefix writer flush/close:\n - {}", error_messages.join("\n - ")))
         }
     }
 }
 
 impl Drop for PrefixWriterManager {
     fn drop(&mut self) {
-        info!("PrefixWriterManager dropping. Attempting final flush...");
-        if let Ok(mut writers_guard) = self.writers.try_lock() {
-            if let Ok(mut lru_guard) = self.lru.try_lock() {
-                let mut errors = Vec::new();
-                for (prefix, writer) in writers_guard.drain() {
-                        if let Some(err_msg) = Self::close_writer(&prefix, writer) {
-                            errors.push(err_msg);
-                        }
+        info!("PrefixWriterManager dropping. Checking for any remaining open writers...");
+        let mut writers_guard = self.writers.lock().unwrap_or_else(|p| {
+            error!("Writers Mutex was poisoned before drop. Attempting to recover.");
+            p.into_inner()
+        });
+
+        if !writers_guard.is_empty() {
+            warn!("PrefixWriterManager drop: {} writers still open! This indicates flush_all() was not called or failed. Attempting emergency close.", writers_guard.len());
+            let mut lru_guard = self.lru.lock().unwrap_or_else(|p| p.into_inner());
+            let mut errors_in_drop: Vec<String> = Vec::new();
+
+            for (prefix, writer) in writers_guard.drain() {
+                error!("Drop: Force closing writer for prefix {}", prefix.0);
+                if let Err(e) = Self::close_writer(&prefix, writer) {
+                    errors_in_drop.push(format!("Drop-Close Error for {}: {}", prefix.0, e));
                 }
-                lru_guard.clear();
-                if !errors.is_empty() {
-                    error!("Errors occurred during final flush in PrefixWriterManager drop:\n - {}", errors.join("\n - "));
-                } else {
-                    info!("Final flush in PrefixWriterManager drop completed.");
-                }
+            }
+            lru_guard.clear();
+            if !errors_in_drop.is_empty() {
+                error!("Errors occurred during emergency writer close in PrefixWriterManager drop:\n - {}", errors_in_drop.join("\n - "));
             } else {
-                error!("Could not lock LRU queue during PrefixWriterManager drop flush. Some files might not be closed cleanly.");
+                info!("Emergency close in PrefixWriterManager drop completed for remaining writers.");
             }
         } else {
-            error!("Could not lock writers map during PrefixWriterManager drop flush. Some files might not be closed cleanly.");
+            info!("PrefixWriterManager drop: No writers were open, flush_all() likely completed successfully.");
         }
     }
 }
@@ -531,7 +535,7 @@ impl Drop for PrefixWriterManager {
 mod memory_usage {
     #[cfg(target_os = "linux")] pub mod linux { use std::fs::read_to_string; use super::MemoryStats; pub fn get_memory_usage() -> Option<MemoryStats> { let pid=std::process::id(); let status_file=format!("/proc/{}/status",pid); let content=read_to_string(status_file).ok()?; let mut vm_rss_kb=None; let mut vm_size_kb=None; for line in content.lines() { if line.starts_with("VmRSS:") { vm_rss_kb=line.split_whitespace().nth(1).and_then(|s|s.parse::<f64>().ok()); } else if line.starts_with("VmSize:") { vm_size_kb=line.split_whitespace().nth(1).and_then(|s|s.parse::<f64>().ok()); } if vm_rss_kb.is_some()&&vm_size_kb.is_some() { break; }} let rss_mb=vm_rss_kb.map(|kb| kb / 1024.0); let vm_size_mb=vm_size_kb.map(|kb| kb / 1024.0); let mut percent=None; if let Ok(meminfo)=read_to_string("/proc/meminfo") { if let Some(mem_total_kb)=meminfo.lines().find(|line|line.starts_with("MemTotal:")).and_then(|line|line.split_whitespace().nth(1)).and_then(|s|s.parse::<f64>().ok()) { if mem_total_kb > 0.0 { if let Some(rss) = vm_rss_kb { percent=Some((rss / mem_total_kb)* 100.0); }}}} Some(MemoryStats { rss_mb: rss_mb.unwrap_or(0.0), vm_size_mb: vm_size_mb.unwrap_or(0.0), percent })}}
     #[cfg(target_os = "macos")] pub mod macos { use std::process::Command; use super::MemoryStats; pub fn get_memory_usage() -> Option<MemoryStats> { let pid=std::process::id(); let ps_output_rss=Command::new("ps").args(&["-o","rss=","-p",&pid.to_string()]).output().ok()?; let rss_kb=String::from_utf8_lossy(&ps_output_rss.stdout).trim().parse::<f64>().ok()?; let ps_output_vsz=Command::new("ps").args(&["-o","vsz=","-p",&pid.to_string()]).output().ok()?; let vsz_kb=String::from_utf8_lossy(&ps_output_vsz.stdout).trim().parse::<f64>().ok()?; let rss_mb=rss_kb/1024.0; let vm_size_mb=vsz_kb/1024.0; let mut percent=None; if let Ok(hw_mem_output)=Command::new("sysctl").args(&["-n","hw.memsize"]).output() { if let Ok(total_bytes_str)=String::from_utf8(hw_mem_output.stdout) { if let Ok(total_bytes)=total_bytes_str.trim().parse::<f64>() { let total_kb=total_bytes / 1024.0; if total_kb > 0.0 { percent=Some((rss_kb/total_kb)* 100.0); }}}} Some(MemoryStats { rss_mb, vm_size_mb, percent })}}
-    #[cfg(target_os = "windows")] pub mod windows { use std::process::Command; use super::MemoryStats; pub fn get_memory_usage() -> Option<MemoryStats> { let pid=std::process::id(); let wmic_output=Command::new("wmic").args(&["process","where",&format!("ProcessId={}", pid),"get","WorkingSetSize,","PageFileUsage","/value",]).output().ok()?; let output_str=String::from_utf8_lossy(&wmic_output.stdout); let mut rss_bytes:Option<f64>=None; let mut vm_kb:Option<f64>=None; for line in output_str.lines() { let parts:Vec<&str>=line.split('=').collect(); if parts.len()==2 { let key=parts[0].trim(); let value=parts[1].trim(); match key { "PageFileUsage"=>vm_kb=value.parse::<f64>().ok(), "WorkingSetSize"=>rss_bytes=value.parse::<f64>().ok(), _=> {} }}} let rss_mb=rss_bytes.map(|b| b / (1024.0*1024.0)); let vm_size_mb=vm_kb.map(|kb| kb / 1024.0); let mut percent=None; if let Ok(mem_output)=Command::new("wmic").args(&["ComputerSystem","get","TotalPhysicalMemory","/value"]).output() { let mem_str=String::from_utf8_lossy(&mem_output.stdout); if let Some(total_bytes_str)=mem_str.lines().find(|line|line.starts_with("TotalPhysicalMemory=")).and_then(|line|line.split('=').nth(1)) { if let Ok(total_bytes)=total_bytes_str.trim().parse::<f64>() { if total_bytes > 0.0 { if let Some(rss) = rss_bytes { percent = Some((rss / total_bytes) * 100.0); }}}}} Some(MemoryStats { rss_mb: rss_mb.unwrap_or(0.0), vm_size_mb: vm_size_mb.unwrap_or(0.0), percent })}}
+    #[cfg(target_os = "windows")] pub mod windows { use std::process::Command as WinCommand; use super::MemoryStats; pub fn get_memory_usage() -> Option<MemoryStats> { let pid=std::process::id(); let wmic_output=WinCommand::new("wmic").args(&["process","where",&format!("ProcessId={}", pid),"get","WorkingSetSize,","PageFileUsage","/value",]).output().ok()?; let output_str=String::from_utf8_lossy(&wmic_output.stdout); let mut rss_bytes:Option<f64>=None; let mut vm_kb:Option<f64>=None; for line in output_str.lines() { let parts:Vec<&str>=line.split('=').collect(); if parts.len()==2 { let key=parts[0].trim(); let value=parts[1].trim(); match key { "PageFileUsage"=>vm_kb=value.parse::<f64>().ok(), "WorkingSetSize"=>rss_bytes=value.parse::<f64>().ok(), _=> {} }}} let rss_mb=rss_bytes.map(|b| b / (1024.0*1024.0)); let vm_size_mb=vm_kb.map(|kb| kb / 1024.0); let mut percent=None; if let Ok(mem_output)=WinCommand::new("wmic").args(&["ComputerSystem","get","TotalPhysicalMemory","/value"]).output() { let mem_str=String::from_utf8_lossy(&mem_output.stdout); if let Some(total_bytes_str)=mem_str.lines().find(|line|line.starts_with("TotalPhysicalMemory=")).and_then(|line|line.split('=').nth(1)) { if let Ok(total_bytes)=total_bytes_str.trim().parse::<f64>() { if total_bytes > 0.0 { if let Some(rss) = rss_bytes { percent = Some((rss / total_bytes) * 100.0); }}}}} Some(MemoryStats { rss_mb: rss_mb.unwrap_or(0.0), vm_size_mb: vm_size_mb.unwrap_or(0.0), percent })}}
     #[derive(Debug)] pub struct MemoryStats { pub rss_mb: f64, pub vm_size_mb: f64, pub percent: Option<f64>, }
     #[cfg(target_os = "linux")] use self::linux::get_memory_usage; #[cfg(target_os = "macos")] use self::macos::get_memory_usage; #[cfg(target_os = "windows")] use self::windows::get_memory_usage;
     #[cfg(not(any(target_os="linux",target_os="macos",target_os="windows")))] pub fn get_memory_usage()->Option<MemoryStats> { None }
@@ -568,10 +572,10 @@ fn main() -> Result<()> {
     };
     SimpleLogger::new()
         .with_level(log_level)
-        .with_timestamp_format(format_description!("[year]-[month]-[day] [hour]:[minute]:[second]"))
+        .with_timestamp_format(format_description!("[year]-[month]-[day] [hour]:[minute]:[second].[subsecond digits:3]"))
         .init()?;
 
-    info!("Starting OpenAlex URL/Affiliation Filter v2.1.0");
+    info!("Starting OpenAlex URL/Affiliation Filter v{}", env!("CARGO_PKG_VERSION"));
     memory_usage::log_memory_usage("initial");
 
     let output_dir = PathBuf::from(&cli.output_dir);
@@ -587,7 +591,7 @@ fn main() -> Result<()> {
         cli.threads
     };
     if let Err(e) = rayon::ThreadPoolBuilder::new().num_threads(num_threads).build_global() {
-        error!("Failed to build global thread pool with {} threads: {}. Proceeding with default.", num_threads, e);
+        error!("Failed to build global thread pool with {} threads: {}. Proceeding with Rayon's default.", num_threads, e);
     }
 
     let base_urls = read_base_urls_from_csv(&cli.base_urls_csv)?;
@@ -609,6 +613,8 @@ fn main() -> Result<()> {
 
     info!("Output directory: {}", output_dir.display());
     info!("Max open prefix files: {}", cli.max_open_prefix_files);
+    info!("Output GZIP compression level: {}", cli.compression_level);
+    info!("Output writer buffer size: {} KB", cli.writer_buffer_kb);
     info!("Statistics logging interval: {} seconds.", cli.stats_interval);
 
     let stats = Arc::new(Stats::new());
@@ -624,9 +630,7 @@ fn main() -> Result<()> {
             if let Ok(guard) = stats_thread_running_clone.try_lock() {
                 if !*guard { info!("Stats thread received stop signal."); break; }
             }
-
             thread::sleep(Duration::from_millis(500));
-
             if last_log_time.elapsed() >= stats_interval_duration {
                 memory_usage::log_memory_usage("periodic check");
                 stats_clone_for_thread.log_current_stats("Processing");
@@ -644,6 +648,8 @@ fn main() -> Result<()> {
             output_dir.clone(),
             cli.max_open_prefix_files,
             Arc::clone(&stats),
+            cli.compression_level,
+            cli.writer_buffer_kb,
         )?
     );
 
@@ -665,12 +671,15 @@ fn main() -> Result<()> {
 
             let file = match File::open(filepath) {
                 Ok(f) => f,
-                Err(e) => return Err(format!("Failed to open {}: {}", filepath.display(), e)),
+                Err(e) => {
+                    let err_msg = format!("Failed to open {}: {}", filepath.display(), e);
+                    error!("{}", err_msg);
+                    return Err(err_msg);
+                }
             };
             let decoder = GzDecoder::new(file);
             let mut reader = BufReader::new(decoder);
-            let mut byte_buffer = Vec::with_capacity(8192);
-
+            let mut byte_buffer = Vec::with_capacity(8192); 
             let mut file_errors: Vec<String> = Vec::new();
 
             loop {
@@ -711,19 +720,18 @@ fn main() -> Result<()> {
                                 };
 
                                 match writer_manager_clone.write_line(&prefix, &byte_buffer) {
-                                    Ok(_) => { }
+                                    Ok(_) => {}
                                     Err(e) => {
-                                        let msg = format!("Failed write for prefix {} from {}: {}", prefix.0, filepath.display(), e);
-                                        error!("{}", msg);
-                                        file_errors.push(msg);
+                                        let msg = format!("Failed write for prefix {} (from file {}): {}", prefix.0, filepath.display(), e);
+                                        file_errors.push(msg); 
                                     }
                                 }
-
                             }
                             Err(e) => {
                                 stats_clone.json_parse_errors.fetch_add(1, Ordering::Relaxed);
-                                if stats_clone.json_parse_errors.load(Ordering::Relaxed) % 5000 == 1 {
-                                    let snippet = String::from_utf8_lossy(&byte_buffer).chars().take(150).collect::<String>();
+                                if stats_clone.json_parse_errors.load(Ordering::Relaxed) % 10000 == 1 {
+                                    let snippet_len = byte_buffer.len().min(150);
+                                    let snippet = String::from_utf8_lossy(&byte_buffer[..snippet_len]);
                                     warn!("JSON parse error in {}: {} (Line starts: '{}...')", filepath.display(), e, snippet);
                                 }
                             }
@@ -750,38 +758,56 @@ fn main() -> Result<()> {
         })
         .collect();
 
-    info!("Flushing remaining writers...");
+    progress_bar.finish_with_message("Processing: All files passed to worker threads.");
+
+    info!("Explicitly flushing all writers...");
     let flush_result = prefix_writer_manager.flush_all();
-    progress_bar.finish_with_message("Processing: Finished filtering and writing.");
 
     let processing_duration = processing_start_time.elapsed();
     stats.log_current_stats("Processing Complete");
 
-    let final_errors = processing_results.iter().filter(|r| r.is_err()).count()
-                            + if flush_result.is_err() { 1 } else { 0 };
+    let mut final_errors_count = 0;
+    let mut error_report_messages: Vec<String> = Vec::new();
+
+    for (i, res) in processing_results.into_iter().enumerate() {
+        if let Err(e_str) = res {
+            final_errors_count += 1;
+            error_report_messages.push(format!("File Processing Error for '{}': {}", files.get(i).map_or_else(|| "Unknown File".to_string(), |p| p.display().to_string()), e_str));
+        }
+    }
+
+    if let Err(e) = flush_result {
+        final_errors_count += 1;
+        error_report_messages.push(format!("Final Writer Flush Error: {}", e));
+    }
 
     info!("--- Processing Summary ---");
     info!("Duration: {}", format_elapsed(processing_duration));
-    info!("Input files processed: {} ({} reported file/write/flush errors)", files.len(), final_errors);
-    if final_errors > 0 {
-        warn!("{} files/operations encountered errors during processing.", final_errors);
-        for result in processing_results.iter().filter_map(|r| r.as_ref().err()) {
-            error!("  - {}", result);
+    info!("Input files scheduled for processing: {}", files.len());
+    info!("Operations with reported errors (file processing or final flush): {}", final_errors_count);
+
+    if final_errors_count > 0 {
+        warn!("{} operations encountered errors during processing or final flush.", final_errors_count);
+        for err_msg in error_report_messages {
+            error!("  Summary Error: {}", err_msg);
         }
-        if let Err(e) = flush_result {
-            error!("  - Final Flush Error: {}", e);
-        }
-        warn!("Processing finished with errors. Output might be incomplete or contain partial data.");
+        warn!("Processing finished with errors. Output might be incomplete or contain corrupted GZ files if flush failed.");
     } else {
-        info!("Processing finished successfully.");
+        info!("Processing and final writer flush finished successfully.");
     }
 
     info!("Signaling stats thread to stop...");
     if let Ok(mut running_guard) = stats_thread_running.lock() { *running_guard = false; }
     else { error!("Failed to lock stats thread running flag to signal stop."); }
-    info!("Waiting for stats thread to finish...");
-    if let Err(e) = stats_thread.join() { error!("Error joining stats thread: {:?}", e); }
-    else { info!("Stats thread joined successfully."); }
+    
+    info!("Waiting for stats thread to finish (max 5s)...");
+    if let Err(_e) = stats_thread.join().map_err(|_| "Stats thread panicked") {
+         error!("Error joining stats thread or thread panicked.");
+    } else {
+         info!("Stats thread joined successfully.");
+    }
+    
+    drop(prefix_writer_manager);
 
     info!("-------------------- FINAL SUMMARY --------------------");
     let total_runtime = main_start_time.elapsed();
@@ -789,15 +815,15 @@ fn main() -> Result<()> {
     info!("Input files found: {}", files.len());
     info!("Base URL filter applied: Matched landing_page_url against {} URL(s) from {}", base_urls_arc.len(), cli.base_urls_csv);
     info!("Affiliation filter applied: At least one authorship must have non-empty raw_affiliation_strings");
-    info!("Processing errors (file/write/flush): {}", final_errors);
+    info!("Total operations with errors (file/write/flush): {}", final_errors_count);
 
     stats.log_current_stats("Final");
     memory_usage::log_memory_usage("final");
     info!("Filtering and organization process finished.");
     info!("-------------------------------------------------------");
 
-    if final_errors > 0 {
-        Err(anyhow!("Processing finished with errors."))
+    if final_errors_count > 0 {
+        Err(anyhow!("Processing finished with {} errors.", final_errors_count))
     } else {
         Ok(())
     }
