@@ -31,9 +31,9 @@ use std::process::Command as WinCommand;
 
 
 #[derive(Parser)]
-#[command(name = "OpenAlex URL/Affiliation Filter")]
+#[command(name = "Get OpenAlex works with PKP Beacon base URL")]
 #[command(about = "Filters OpenAlex JSONL.gz files based on locations[].landing_page_url matching ANY URL in a CSV and *at least one non-empty* authorships[].raw_affiliation_strings, organizing by DOI prefix.")]
-#[command(version = "2.1.0")]
+#[command(version = "1.0.0")]
 struct Cli {
     #[arg(short, long, help = "Directory containing input JSONL.gz files", required = true)]
     input_dir: String,
@@ -44,7 +44,7 @@ struct Cli {
     #[arg(long, short = 'b', help = "Path to CSV file containing base URLs (header 'base_url')", required = true)]
     base_urls_csv: String,
 
-    #[arg(long, default_value = "256", help = "Max open final prefix output files")]
+    #[arg(long, default_value = "64", help = "Max open final prefix output files")]
     max_open_prefix_files: usize,
 
     #[arg(short, long, default_value = "INFO", help = "Logging level (DEBUG, INFO, WARN, ERROR)")]
