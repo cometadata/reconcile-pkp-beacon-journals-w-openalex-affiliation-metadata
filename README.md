@@ -1,1 +1,1 @@
-# PKP-Journals-OpenAlex-accuracy-assessment
+# Reconcile PKP Beacon Journals with OpenAlex Affiliation Metadata
