@@ -19,13 +19,6 @@ Expects CSV with columns:
 - `institution_similarity_score`
 
 ## Outputs
-
-### Overall Statistics (-o1)
-- Match counts and percentages
-- Score statistics (mean, median, min, max, stdev)
-- Special cases (e.g., high scores without matches)
-
-### Per-DOI Statistics (-o2)
-- Author/institution match counts per DOI
-- Score statistics per DOI
-- Flags for all/any matches
+The script putputs two CSVs:
+- Overall statistics: Contains match counts and percentages, score statistics (mean, median, min, max, stdev), and highlights a small set of special cases (e.g., high scores without matches)
+- Per-DOI statistics: Author/institution match counts per DOI
