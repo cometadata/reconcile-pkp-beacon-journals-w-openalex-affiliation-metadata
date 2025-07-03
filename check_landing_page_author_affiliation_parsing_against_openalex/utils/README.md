@@ -1,4 +1,4 @@
-# get_stats.py
+# Get Stats
 
 Calculates statistics from check_landing_page_author_affiliation_parsing_against_openalex.py output.
 
