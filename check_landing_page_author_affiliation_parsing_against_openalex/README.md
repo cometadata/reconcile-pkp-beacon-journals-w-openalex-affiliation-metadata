@@ -1,4 +1,4 @@
-# check_landing_page_author_affiliation_parsing_against_openalex.py
+# Check Landing Page Authors and Affiliations against OpenAlex
 
 Validates author and institution data from landing page parsing against OpenAlex API records.
 
