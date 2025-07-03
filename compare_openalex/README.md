@@ -1,4 +1,4 @@
-### PKP Beacon Journal and OpenAlex Data Comparison Pipeline*
+### PKP Beacon Journal and OpenAlex Data Comparison Pipeline
 
 We begin with the `get_journal_base_urls_from_pkp_beacon_file.py` script, which takes the [PKP Beacon data file](https://doi.org/10.7910/DVN/OCZNVY) as input. From this, we processes the `oai_url` column to produce a deduplicated CSV file containing a single `base_url` column for each journal.
 
