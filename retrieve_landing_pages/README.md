@@ -1,4 +1,4 @@
-# retrieve_landing_pages.py
+# Retrieve Landing Pages
 
 Fetches and saves HTML files from PKP Beacon journal landing pages.
 
