@@ -9,14 +9,18 @@ import time
 import argparse
 import logging
 import traceback
-import base64
 from pathlib import Path
 from datetime import datetime
 
 import torch
 from PIL import Image
-from openai import OpenAI
 from transformers import AutoTokenizer, AutoProcessor, AutoModelForImageTextToText
+
+try:
+    from vllm import LLM, SamplingParams
+    VLLM_AVAILABLE = True
+except ImportError:
+    VLLM_AVAILABLE = False
 
 
 def setup_logger(log_dir=None):
@@ -62,11 +66,11 @@ def parse_arguments():
 Examples:
   %(prog)s -i image.jpg -m nanonets/Nanonets-OCR-s
   
-  %(prog)s -i image.jpg -m nanonets/Nanonets-OCR-s --use-vllm --vllm-port 8000
+  %(prog)s -i image.jpg -m nanonets/Nanonets-OCR-s --use-vllm --tensor-parallel-size 2
   
   %(prog)s -i /path/to/images/ -m nanonets/Nanonets-OCR-s
   
-  %(prog)s -i /base/path -p "*/images/*.jpg" -m nanonets/Nanonets-OCR-s --use-vllm
+  %(prog)s -i /base/path -p "*/images/*.jpg" -m nanonets/Nanonets-OCR-s --use-vllm --gpu-memory-utilization 0.8
         """
     )
 
@@ -135,21 +139,21 @@ Examples:
     parser.add_argument(
         "--use-vllm",
         action="store_true",
-        help="Use VLLM server for inference instead of local transformers"
+        help="Use VLLM offline inference instead of local transformers"
     )
     
     parser.add_argument(
-        "--vllm-host",
-        type=str,
-        default="localhost",
-        help="VLLM server host (default: localhost)"
-    )
-    
-    parser.add_argument(
-        "--vllm-port",
+        "--tensor-parallel-size",
         type=int,
-        default=8000,
-        help="VLLM server port (default: 8000)"
+        default=1,
+        help="Number of GPUs to use for tensor parallelism (default: 1)"
+    )
+    
+    parser.add_argument(
+        "--gpu-memory-utilization",
+        type=float,
+        default=0.9,
+        help="GPU memory utilization ratio (default: 0.9)"
     )
 
     return parser.parse_args()
@@ -224,34 +228,32 @@ def get_extraction_prompt():
     return """Extract the text from the above document as if you were reading it naturally. Return the tables in html format. Return the equations in LaTeX representation. If there is an image in the document and image caption is not present, add a small description of the image inside the <img></img> tag; otherwise, add the image caption inside <img></img>. Watermarks should be wrapped in brackets. Ex: <watermark>OFFICIAL COPY</watermark>. Page numbers should be wrapped in brackets. Ex: <page_number>14</page_number> or <page_number>9/22</page_number>. Prefer using ☐ and ☑ for check boxes."""
 
 
-def init_vllm_client(host, port, model_name, verbose=False):
-    if OpenAI is None:
-        raise ImportError("OpenAI client is required for VLLM mode. Install with: pip install openai")
-    
-    base_url = f"http://{host}:{port}/v1"
+def init_vllm_llm(model_name, tensor_parallel_size=1, gpu_memory_utilization=0.9, verbose=False):
+    if not VLLM_AVAILABLE:
+        raise ImportError("VLLM is required for VLLM mode. Install with: pip install vllm")
     
     if verbose:
-        print(f"Initializing VLLM client at {base_url}")
+        print(f"Initializing VLLM offline LLM")
         print(f"Model: {model_name}")
-    
-    client = OpenAI(
-        api_key="dummy",
-        base_url=base_url
-    )
+        print(f"Tensor parallel size: {tensor_parallel_size}")
+        print(f"GPU memory utilization: {gpu_memory_utilization}")
     
     try:
-        models = client.models.list()
-        available_models = [model.id for model in models.data]
-        if verbose:
-            print(f"Available models: {available_models}")
+        llm = LLM(
+            model=model_name,
+            tensor_parallel_size=tensor_parallel_size,
+            gpu_memory_utilization=gpu_memory_utilization,
+            trust_remote_code=True,
+            max_model_len=8192  # Adjust based on model requirements
+        )
         
-        if model_name not in available_models:
-            print(f"Warning: Model {model_name} not in available models: {available_models}")
+        if verbose:
+            print("VLLM LLM initialized successfully")
+        
+        return llm
     except Exception as e:
-        print(f"Warning: Could not list models from VLLM server: {e}")
-        print("Continuing anyway - the server might still work")
-    
-    return client
+        print(f"Error initializing VLLM LLM: {e}")
+        raise
 
 
 def load_model(model_name, use_fast=True, verbose=False):
@@ -291,12 +293,8 @@ def load_model(model_name, use_fast=True, verbose=False):
         sys.exit(1)
 
 
-def encode_image_to_base64(image_path):
-    with open(image_path, "rb") as image_file:
-        return base64.b64encode(image_file.read()).decode("utf-8")
 
-
-def extract_text_from_image_vllm(image_path, client, model_name, max_tokens=2048, temperature=0.0, verbose=False):
+def extract_text_from_image_vllm(image_path, llm, max_tokens=2048, temperature=0.0, verbose=False):
     error_details = {}
     
     try:
@@ -321,55 +319,59 @@ def extract_text_from_image_vllm(image_path, client, model_name, max_tokens=2048
             if logger:
                 logger.debug(f"File size: {file_size_mb:.2f} MB")
             
-            img_base64 = encode_image_to_base64(image_path)
+            # Load image directly for VLLM
+            image = Image.open(image_path)
             
             if logger:
-                logger.debug(f"Image encoded to base64, length: {len(img_base64)}")
+                logger.debug(f"Image loaded: {image.size}, mode: {image.mode}")
                 
         except Exception as e:
-            error_details['phase'] = 'image_encoding'
+            error_details['phase'] = 'image_loading'
             error_details['error_type'] = type(e).__name__
             raise
         
         try:
             prompt = get_extraction_prompt()
             
+            # Create the prompt for VLLM's chat interface
             messages = [
                 {
                     "role": "user",
                     "content": [
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:image/png;base64,{img_base64}"},
-                        },
-                        {
-                            "type": "text",
-                            "text": prompt,
-                        },
+                        {"type": "image", "image": f"file://{image_path}"},
+                        {"type": "text", "text": prompt},
                     ],
                 }
             ]
             
             if logger:
-                logger.debug("Request prepared for VLLM server")
+                logger.debug("Prompt prepared for VLLM")
                 
         except Exception as e:
-            error_details['phase'] = 'request_preparation'
+            error_details['phase'] = 'prompt_preparation'
             error_details['error_type'] = type(e).__name__
             raise
         
         try:
             if logger:
-                logger.debug(f"Sending request to VLLM server with model {model_name}")
+                logger.debug("Starting VLLM generation")
             
-            response = client.chat.completions.create(
-                model=model_name,
-                messages=messages,
+            # Create sampling parameters
+            sampling_params = SamplingParams(
                 temperature=temperature,
-                max_tokens=max_tokens
+                max_tokens=max_tokens,
+                stop_token_ids=None
             )
             
-            output_text = response.choices[0].message.content
+            # Generate response using VLLM's chat interface
+            outputs = llm.chat(
+                messages=messages,
+                sampling_params=sampling_params,
+                use_tqdm=False
+            )
+            
+            # Extract the generated text
+            output_text = outputs[0].outputs[0].text
             
             elapsed_time = time.time() - start_time
             
@@ -380,7 +382,7 @@ def extract_text_from_image_vllm(image_path, client, model_name, max_tokens=2048
             return output_text, elapsed_time
             
         except Exception as e:
-            error_details['phase'] = 'api_call'
+            error_details['phase'] = 'generation'
             error_details['error_type'] = type(e).__name__
             raise
     
@@ -577,12 +579,12 @@ def get_output_filename(image_path, output_dir=None):
         return output_name
 
 
-def process_single_image(image_path, model, tokenizer, processor, output_dir=None, max_tokens=2048, temperature=0.0, verbose=False, use_vllm=False, vllm_client=None, model_name=None):
+def process_single_image(image_path, model, tokenizer, processor, output_dir=None, max_tokens=2048, temperature=0.0, verbose=False, use_vllm=False, vllm_llm=None, model_name=None):
     if use_vllm:
-        if vllm_client is None:
-            raise ValueError("VLLM client is required when use_vllm=True")
+        if vllm_llm is None:
+            raise ValueError("VLLM LLM is required when use_vllm=True")
         text, elapsed_time = extract_text_from_image_vllm(
-            image_path, vllm_client, model_name, max_tokens, temperature, verbose)
+            image_path, vllm_llm, max_tokens, temperature, verbose)
     else:
         text, elapsed_time = extract_text_from_image(
             image_path, model, tokenizer, processor, max_tokens, temperature, verbose)
@@ -627,7 +629,7 @@ def check_directory_fully_processed(directory, model_name, image_files):
     return is_fully_processed, processed_count, len(image_files)
 
 
-def process_directory(directory, model, tokenizer, processor, output_dir, model_name, max_tokens=2048, temperature=0.0, verbose=False, resume=False, use_vllm=False, vllm_client=None):
+def process_directory(directory, model, tokenizer, processor, output_dir, model_name, max_tokens=2048, temperature=0.0, verbose=False, resume=False, use_vllm=False, vllm_llm=None):
     image_files = get_image_files(directory)
 
     if not image_files:
@@ -673,7 +675,7 @@ def process_directory(directory, model, tokenizer, processor, output_dir, model_
 
         success, elapsed_time, failed_path = process_single_image(
             image_path, model, tokenizer, processor, output_dir,
-            max_tokens, temperature, verbose, use_vllm, vllm_client, model_name
+            max_tokens, temperature, verbose, use_vllm, vllm_llm, model_name
         )
 
         if success:
@@ -706,7 +708,7 @@ def process_directory(directory, model, tokenizer, processor, output_dir, model_
             print(f"Error saving failed images list: {e}")
 
 
-def process_subdirectories(base_path, pattern, model, tokenizer, processor, model_name, max_tokens=2048, temperature=0.0, verbose=False, resume=False, use_vllm=False, vllm_client=None):
+def process_subdirectories(base_path, pattern, model, tokenizer, processor, model_name, max_tokens=2048, temperature=0.0, verbose=False, resume=False, use_vllm=False, vllm_llm=None):
     search_pattern = os.path.join(base_path, pattern)
     matching_files = glob.glob(search_pattern, recursive=True)
 
@@ -767,7 +769,7 @@ def process_subdirectories(base_path, pattern, model, tokenizer, processor, mode
 
             success, elapsed_time, failed_path = process_single_image(
                 image_path, model, tokenizer, processor, output_dir,
-                max_tokens, temperature, verbose, use_vllm, vllm_client, model_name
+                max_tokens, temperature, verbose, use_vllm, vllm_llm, model_name
             )
 
             if success:
@@ -801,15 +803,20 @@ def main():
     log_system_info()
 
     if args.use_vllm:
-        print(f"Using VLLM mode with server at {args.vllm_host}:{args.vllm_port}")
-        vllm_client = init_vllm_client(args.vllm_host, args.vllm_port, args.model, args.verbose)
+        print("Using VLLM offline inference mode")
+        vllm_llm = init_vllm_llm(
+            args.model, 
+            args.tensor_parallel_size, 
+            args.gpu_memory_utilization, 
+            args.verbose
+        )
         model = None
         tokenizer = None
         processor = None
     else:
         print("Using local Transformers mode")
         model, tokenizer, processor = load_model(args.model, args.use_fast, args.verbose)
-        vllm_client = None
+        vllm_llm = None
 
     input_path = args.input
 
@@ -818,7 +825,7 @@ def main():
         success, elapsed_time, failed_path = process_single_image(
             input_path, model, tokenizer, processor, args.output,
             args.max_tokens, args.temperature, args.verbose,
-            args.use_vllm, vllm_client, args.model
+            args.use_vllm, vllm_llm, args.model
         )
 
         if success:
@@ -835,7 +842,7 @@ def main():
         process_directory(
             input_path, model, tokenizer, processor, args.output, args.model,
             args.max_tokens, args.temperature, args.verbose, args.resume,
-            args.use_vllm, vllm_client
+            args.use_vllm, vllm_llm
         )
 
     elif os.path.isdir(input_path) and args.pattern:
@@ -843,7 +850,7 @@ def main():
         process_subdirectories(
             input_path, args.pattern, model, tokenizer, processor, args.model,
             args.max_tokens, args.temperature, args.verbose, args.resume,
-            args.use_vllm, vllm_client
+            args.use_vllm, vllm_llm
         )
 
     else:
