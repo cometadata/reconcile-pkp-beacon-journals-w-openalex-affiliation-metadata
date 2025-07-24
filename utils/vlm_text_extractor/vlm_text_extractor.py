@@ -365,6 +365,9 @@ def extract_text_from_image_vllm(image_path, llm, max_tokens=2048, temperature=0
         try:
             prompt = get_extraction_prompt()
             
+            # Convert to absolute path for VLLM
+            absolute_image_path = os.path.abspath(image_path)
+            
             # Create the prompt for VLLM's chat interface using OpenAI-compatible format
             messages = [
                 {
@@ -372,7 +375,7 @@ def extract_text_from_image_vllm(image_path, llm, max_tokens=2048, temperature=0
                     "content": [
                         {
                             "type": "image_url",
-                            "image_url": {"url": f"file://{image_path}"}
+                            "image_url": {"url": f"file://{absolute_image_path}"}
                         },
                         {
                             "type": "text", 
@@ -383,7 +386,7 @@ def extract_text_from_image_vllm(image_path, llm, max_tokens=2048, temperature=0
             ]
             
             if logger:
-                logger.debug("Prompt prepared for VLLM")
+                logger.debug(f"Prompt prepared for VLLM with absolute path: {absolute_image_path}")
                 
         except Exception as e:
             error_details['phase'] = 'prompt_preparation'
