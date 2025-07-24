@@ -364,13 +364,19 @@ def extract_text_from_image_vllm(image_path, llm, max_tokens=2048, temperature=0
         try:
             prompt = get_extraction_prompt()
             
-            # Create the prompt for VLLM's chat interface
+            # Create the prompt for VLLM's chat interface using OpenAI-compatible format
             messages = [
                 {
                     "role": "user",
                     "content": [
-                        {"type": "image", "image": f"file://{image_path}"},
-                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"file://{image_path}"}
+                        },
+                        {
+                            "type": "text", 
+                            "text": prompt
+                        },
                     ],
                 }
             ]
