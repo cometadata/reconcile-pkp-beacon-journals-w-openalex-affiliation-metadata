@@ -262,7 +262,8 @@ def init_vllm_llm(model_name, tensor_parallel_size=1, gpu_memory_utilization=0.9
                 tensor_parallel_size=tp_size,
                 gpu_memory_utilization=gpu_memory_utilization,
                 trust_remote_code=True,
-                max_model_len=8192  # Adjust based on model requirements
+                max_model_len=8192,  # Adjust based on model requirements
+                allowed_local_media_path="/"  # Allow loading images from any local path
             )
             
             if verbose:
