@@ -238,22 +238,53 @@ def init_vllm_llm(model_name, tensor_parallel_size=1, gpu_memory_utilization=0.9
         print(f"Tensor parallel size: {tensor_parallel_size}")
         print(f"GPU memory utilization: {gpu_memory_utilization}")
     
-    try:
-        llm = LLM(
-            model=model_name,
-            tensor_parallel_size=tensor_parallel_size,
-            gpu_memory_utilization=gpu_memory_utilization,
-            trust_remote_code=True,
-            max_model_len=8192  # Adjust based on model requirements
-        )
-        
-        if verbose:
-            print("VLLM LLM initialized successfully")
-        
-        return llm
-    except Exception as e:
-        print(f"Error initializing VLLM LLM: {e}")
-        raise
+    # Try with requested tensor_parallel_size first, then fall back to smaller sizes
+    tensor_sizes_to_try = []
+    
+    # Start with the requested size and work down to divisors
+    for size in range(tensor_parallel_size, 0, -1):
+        if tensor_parallel_size % size == 0 or size == 1:
+            tensor_sizes_to_try.append(size)
+    
+    # Always ensure 1 is in the list as final fallback
+    if 1 not in tensor_sizes_to_try:
+        tensor_sizes_to_try.append(1)
+    
+    last_error = None
+    
+    for tp_size in tensor_sizes_to_try:
+        try:
+            if verbose and tp_size != tensor_parallel_size:
+                print(f"Falling back to tensor_parallel_size={tp_size}")
+            
+            llm = LLM(
+                model=model_name,
+                tensor_parallel_size=tp_size,
+                gpu_memory_utilization=gpu_memory_utilization,
+                trust_remote_code=True,
+                max_model_len=8192  # Adjust based on model requirements
+            )
+            
+            if verbose:
+                print(f"VLLM LLM initialized successfully with tensor_parallel_size={tp_size}")
+            
+            return llm
+            
+        except Exception as e:
+            last_error = e
+            if verbose:
+                print(f"Failed with tensor_parallel_size={tp_size}: {e}")
+            
+            # Check if it's a divisibility error and continue trying smaller sizes
+            if "is not divisible by" in str(e):
+                continue
+            else:
+                # For other errors, don't continue trying smaller sizes
+                break
+    
+    # If we get here, all attempts failed
+    print(f"Error initializing VLLM LLM with all attempted tensor parallel sizes: {last_error}")
+    raise last_error
 
 
 def load_model(model_name, use_fast=True, verbose=False):
