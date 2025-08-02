@@ -31,7 +31,7 @@ def format_reward(completions, **kwargs):
     rewards = []
 
     for completion in completions:
-        if parse_completion(completion) is None:
+        if parse_completion(completion[0]['content']) is None:
             rewards.append(0)
         else:
             rewards.append(1)
