@@ -106,6 +106,7 @@ def main():
         log_completions = True,
         run_name = run_name,
         report_to = 'wandb',
+        use_vllm = True,
     )
 
     trainer = GRPOTrainer(
