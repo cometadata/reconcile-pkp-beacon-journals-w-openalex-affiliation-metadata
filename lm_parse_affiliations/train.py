@@ -76,6 +76,7 @@ def main():
         lora_dropout=0.01,
         bias="none",
         task_type="CAUSAL_LM",
+        target_modules=["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
     )
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
