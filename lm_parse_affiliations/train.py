@@ -91,7 +91,7 @@ def main():
         output_dir = output_dir,
 
         per_device_train_batch_size = 1,
-        gradient_accumulation_steps = 4,
+        gradient_accumulation_steps = 8,
         learning_rate = args.learning_rate,
         lr_scheduler_type = "cosine",
         warmup_ratio = 0.03,
