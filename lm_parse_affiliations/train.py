@@ -1,0 +1,123 @@
+from datasets import load_from_disk
+from trl import GRPOConfig, GRPOTrainer
+from argparse import ArgumentParser
+from markitdown import MarkItDown
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import LoraConfig, get_peft_model
+from datetime import datetime
+from pathlib import Path
+from dotenv import load_dotenv
+
+from prompt import SYSTEM_PROMPT
+from reward import format_reward, answer_reward
+
+assert load_dotenv(), "Failed to load environment variables from .env file."
+
+md = MarkItDown()
+
+def parse_args():
+    parser = ArgumentParser(description="Train a GRPO model on the arXiv affiliation dataset.")
+
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="Qwen/Qwen3-4B",
+        help="The model to use for training. Default is Qwen/Qwen3-4B.",
+    )
+
+    parser.add_argument(
+        "--checkpoint_dir",
+        type=str,
+        default="checkpoints",
+        help="Directory to save the trained model checkpoints.",
+    )
+
+    parser.add_argument(
+        "--learning_rate", "-lr",
+        type=float,
+        default=1e-5,
+        help="Learning rate for the optimizer. Default is 1e-5.",
+    )
+
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    dataset = load_from_disk('data/arxiv_author_affiliations')
+
+    # add chat format
+    dataset = dataset.map(
+        lambda x: {
+            "prompt": [
+                {
+                    "role": "system",
+                    "content": SYSTEM_PROMPT,
+                },
+                {
+                    "role": "user",
+                    "content": x["pdf_content"],
+                },
+            ],
+            "answer": x['authors'],
+        },
+        remove_columns=["doi", "title", "authors", "filename", "pdf_content"],
+    )
+
+    # load model and tokenizer
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model,
+        device_map="auto",
+    )
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    tokenizer.pad_token = tokenizer.eos_token
+
+    # lora
+    lora_config = LoraConfig(
+        r=8,
+        lora_alpha=16,
+        lora_dropout=0.01,
+        bias="none",
+        task_type="CAUSAL_LM",
+    )
+    model = get_peft_model(model, lora_config)
+    model.print_trainable_parameters()
+
+    # run
+    run_name = f'grpo-{datetime.now().strftime("%Y-%m-%d-%H-%M")}-{args.model.split("/")[-1]}'
+    output_dir = Path(args.checkpoint_dir) / run_name
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # trainer
+    config = GRPOConfig(
+        output_dir = output_dir,
+
+        auto_find_batch_size = True,
+        learning_rate = args.learning_rate,
+        lr_scheduler_type = "cosine",
+        warmup_ratio = 0.03,
+
+        max_prompt_length = 16_000,
+        max_completion_length = 32_000,
+
+        scale_rewards = False,
+        loss_type = "dr_grpo",
+
+        logging_steps=10,
+        save_steps=100,
+        log_completions = True,
+        run_name = run_name,
+        report_to = 'wandb',
+    )
+
+    trainer = GRPOTrainer(
+        model=model,
+        reward_funcs=[format_reward, answer_reward],
+        args=config,
+        train_dataset=dataset,
+        processing_class=tokenizer,
+    )
+
+    # start training
+    trainer.train()
+    trainer.save_model(output_dir / "final")
