@@ -41,9 +41,17 @@ def parse_args():
 
 def main():
     args = parse_args()
-    dataset = load_from_disk('data/arxiv_author_affiliations')
 
-    # add chat format
+    # load model and tokenizer
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model,
+        device_map="auto",
+    )
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    tokenizer.pad_token = tokenizer.eos_token
+
+    # load dataset
+    dataset = load_from_disk('data/arxiv_author_affiliations')
     dataset = dataset.map(
         lambda x: {
             "prompt": [
@@ -53,21 +61,13 @@ def main():
                 },
                 {
                     "role": "user",
-                    "content": x["pdf_content"],
+                    "content": tokenizer.decode(tokenizer(x["pdf_content"], truncation=True, max_length=15_000).input_ids, skip_special_tokens=True),
                 },
             ],
             "answer": x['authors'],
         },
         remove_columns=["doi", "title", "authors", "filename", "pdf_content"],
     )
-
-    # load model and tokenizer
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model,
-        device_map="auto",
-    )
-    tokenizer = AutoTokenizer.from_pretrained(args.model)
-    tokenizer.pad_token = tokenizer.eos_token
 
     # lora
     lora_config = LoraConfig(
