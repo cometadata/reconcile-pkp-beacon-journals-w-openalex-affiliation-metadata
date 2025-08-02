@@ -65,7 +65,8 @@ def answer_reward(completions, answer, **kwargs):
     answers = answer
 
     for completion, answer in zip(completions, answers):
-        completion = completion['content'] # message dictionary -> text of message
+        completion = completion[0]['content'] # message dictionary -> text of message
+        print(completion)
         prediction = parse_completion(completion)
         if prediction is None:
             rewards.append(0)
