@@ -1,7 +1,6 @@
 from datasets import load_from_disk
 from trl import GRPOConfig, GRPOTrainer
 from argparse import ArgumentParser
-from markitdown import MarkItDown
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import LoraConfig, get_peft_model
 from datetime import datetime
@@ -12,8 +11,6 @@ from prompt import SYSTEM_PROMPT
 from reward import format_reward, answer_reward
 
 assert load_dotenv(), "Failed to load environment variables from .env file."
-
-md = MarkItDown()
 
 def parse_args():
     parser = ArgumentParser(description="Train a GRPO model on the arXiv affiliation dataset.")
@@ -121,3 +118,10 @@ def main():
     # start training
     trainer.train()
     trainer.save_model(output_dir / "final")
+    tokenizer.save_pretrained(output_dir / "final")
+
+    print(f"Training completed. Model saved to {output_dir / 'final'}.")
+
+
+if __name__ == "__main__":
+    main()
