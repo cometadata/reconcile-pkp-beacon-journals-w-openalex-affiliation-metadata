@@ -44,11 +44,11 @@ def match_fuzzy(source, target, threshold = 90):
     Fuzzy match two lists of authors and return a mapping from source index to target index.
     """
     mapping = {}
-    for i, source_author in enumerate(source):
+    for i, s in enumerate(source):
         best_match = None
         best_score = 0
-        for j, target_author in enumerate(target):
-            score = fuzz.ratio(source_author['name'], target_author['name'])
+        for j, t in enumerate(target):
+            score = fuzz.ratio(s, t)
             if score > best_score and score >= threshold:
                 best_score = score
                 best_match = j
