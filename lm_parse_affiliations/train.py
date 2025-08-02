@@ -90,7 +90,8 @@ def main():
     config = GRPOConfig(
         output_dir = output_dir,
 
-        auto_find_batch_size = True,
+        per_device_train_batch_size = 1,
+        gradient_accumulation_steps = 4,
         learning_rate = args.learning_rate,
         lr_scheduler_type = "cosine",
         warmup_ratio = 0.03,
@@ -106,7 +107,7 @@ def main():
         log_completions = True,
         run_name = run_name,
         report_to = 'wandb',
-        use_vllm = True,
+        use_vllm = False,
     )
 
     trainer = GRPOTrainer(

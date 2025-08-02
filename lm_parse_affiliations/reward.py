@@ -59,8 +59,10 @@ def match_fuzzy(source, target, threshold = 90):
     return mapping
 
 
-def answer_reward(completions, answers, **kwargs):
+def answer_reward(completions, answer, **kwargs):
     rewards = []
+
+    answers = answer
 
     for completion, answer in zip(completions, answers):
         completion = completion['content'] # message dictionary -> text of message
