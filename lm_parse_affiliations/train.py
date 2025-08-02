@@ -68,6 +68,7 @@ def main():
         },
         remove_columns=["doi", "title", "authors", "filename", "pdf_content"],
     )
+    dataset.save_to_disk('data/arxiv_author_affiliations_chat_16k')
 
     # lora
     lora_config = LoraConfig(
