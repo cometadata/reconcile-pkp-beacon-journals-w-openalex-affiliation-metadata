@@ -104,7 +104,7 @@ def main():
         loss_type = "dr_grpo",
 
         logging_steps=10,
-        save_steps=100,
+        save_steps=50,
         log_completions = True,
         run_name = run_name,
         report_to = 'wandb',
@@ -120,7 +120,7 @@ def main():
     )
 
     # start training
-    trainer.train()
+    trainer.train("checkpoints/grpo-2025-08-02-10-09-Qwen3-4B/checkpoint-100")
     trainer.save_model(output_dir / "final")
     tokenizer.save_pretrained(output_dir / "final")
 
