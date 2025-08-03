@@ -51,24 +51,24 @@ def main():
     tokenizer.pad_token = tokenizer.eos_token
 
     # load dataset
-    dataset = load_from_disk('data/arxiv_author_affiliations')
-    dataset = dataset.map(
-        lambda x: {
-            "prompt": [
-                {
-                    "role": "system",
-                    "content": SYSTEM_PROMPT,
-                },
-                {
-                    "role": "user",
-                    "content": tokenizer.decode(tokenizer(x["pdf_content"], truncation=True, max_length=15_000).input_ids, skip_special_tokens=True),
-                },
-            ],
-            "answer": x['authors'],
-        },
-        remove_columns=["doi", "title", "authors", "filename", "pdf_content"],
-    )
-    dataset.save_to_disk('data/arxiv_author_affiliations_chat_16k')
+    dataset = load_from_disk('data/arxiv_author_affiliations_chat_16k')
+    # dataset = dataset.map(
+    #     lambda x: {
+    #         "prompt": [
+    #             {
+    #                 "role": "system",
+    #                 "content": SYSTEM_PROMPT,
+    #             },
+    #             {
+    #                 "role": "user",
+    #                 "content": tokenizer.decode(tokenizer(x["pdf_content"], truncation=True, max_length=15_000).input_ids, skip_special_tokens=True),
+    #             },
+    #         ],
+    #         "answer": x['authors'],
+    #     },
+    #     remove_columns=["doi", "title", "authors", "filename", "pdf_content"],
+    # )
+    # dataset.save_to_disk('data/arxiv_author_affiliations_chat_16k')
 
     # lora
     lora_config = LoraConfig(
