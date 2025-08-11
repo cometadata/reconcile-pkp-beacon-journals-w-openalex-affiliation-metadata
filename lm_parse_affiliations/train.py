@@ -97,7 +97,7 @@ def main():
         lr_scheduler_type = "cosine",
         warmup_ratio = 0.03,
 
-        max_prompt_length = 8_000,
+        max_prompt_length = 13_000,
         max_completion_length = 16_000,
 
         scale_rewards = False,
