@@ -61,7 +61,7 @@ def main():
                 },
                 {
                     "role": "user",
-                    "content": tokenizer.decode(tokenizer(x["pdf_content"], truncation=True, max_length=7_000).input_ids, skip_special_tokens=True),
+                    "content": tokenizer.decode(tokenizer(x["pdf_content"], truncation=True, max_length=6_000).input_ids, skip_special_tokens=True),
                 },
             ],
             "answer": x['authors'],
@@ -97,8 +97,8 @@ def main():
         lr_scheduler_type = "cosine",
         warmup_ratio = 0.03,
 
-        max_prompt_length = 8_000,
-        max_completion_length = 16_000,
+        max_prompt_length = 7_000,
+        max_completion_length = 2_000,
 
         scale_rewards = False,
         loss_type = "dr_grpo",
