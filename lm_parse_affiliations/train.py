@@ -83,7 +83,7 @@ def main():
     model.print_trainable_parameters()
 
     # run
-    run_name = f'grpo-{datetime.now().strftime("%Y-%m-%d-%H-%M")}-{args.model.split("/")[-1]}'
+    run_name = f'grpo-{args.model.split("/")[-1]}-lr{args.learning_rate}'
     output_dir = Path(args.checkpoint_dir) / run_name
     output_dir.mkdir(parents=True, exist_ok=True)
 
