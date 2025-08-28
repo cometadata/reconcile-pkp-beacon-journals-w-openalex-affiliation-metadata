@@ -120,7 +120,7 @@ def main():
     )
 
     # start training
-    trainer.train("checkpoints/grpo-2025-08-03-11-51-Qwen3-4B/checkpoint-200")
+    trainer.train("checkpoints/grpo-2025-08-11-14-43-Qwen3-4B/checkpoint-400")
     trainer.save_model(output_dir / "final")
     tokenizer.save_pretrained(output_dir / "final")
 
