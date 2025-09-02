@@ -81,7 +81,8 @@ def answer_reward(completions, answer, **kwargs):
 
         unmatched_source = set(range(len(gt_authors))) - set(mapping.keys())
         unmatched_target = set(range(len(found_authors))) - set(mapping.values())
-        iou_authors = len(mapping) / (len(unmatched_source) + len(unmatched_target) + len(mapping))
+        total_authors = len(unmatched_source) + len(unmatched_target) + len(mapping)
+        iou_authors = len(mapping) / total_authors if total_authors > 0 else 1.0
         r += iou_authors
 
         # for each of the matched authors, match affiliations and increase reward by iou
@@ -95,7 +96,8 @@ def answer_reward(completions, answer, **kwargs):
             affiliation_mapping = match_fuzzy(source_affiliations, target_affiliations)
             unmatched_source = set(range(len(source_affiliations))) - set(affiliation_mapping.keys())
             unmatched_target = set(range(len(target_affiliations))) - set(affiliation_mapping.values())
-            iou_affiliations = len(affiliation_mapping) / (len(unmatched_source) + len(unmatched_target) + len(affiliation_mapping))
+            total_affiliations = len(unmatched_source) + len(unmatched_target) + len(affiliation_mapping)
+            iou_affiliations = len(affiliation_mapping) / total_affiliations if total_affiliations > 0 else 1.0
             r += iou_affiliations
 
         rewards.append(r)
