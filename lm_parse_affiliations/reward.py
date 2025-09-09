@@ -66,7 +66,6 @@ def answer_reward(completions, answer, **kwargs):
 
     for completion, answer in zip(completions, answers):
         completion = completion[0]['content'] # message dictionary -> text of message
-        print(completion)
         prediction = parse_completion(completion)
         if prediction is None:
             rewards.append(0)
@@ -86,6 +85,8 @@ def answer_reward(completions, answer, **kwargs):
         r += iou_authors
 
         # for each of the matched authors, match affiliations and increase reward by iou
+        affiliation_r = 0.0
+        affiliation_n = len(mapping)
         for source_idx, target_idx in mapping.items():
             source_affiliations = answer[source_idx]['affiliations']
             target_affiliations = prediction[target_idx]['affiliations']
@@ -98,8 +99,16 @@ def answer_reward(completions, answer, **kwargs):
             unmatched_target = set(range(len(target_affiliations))) - set(affiliation_mapping.values())
             total_affiliations = len(unmatched_source) + len(unmatched_target) + len(affiliation_mapping)
             iou_affiliations = len(affiliation_mapping) / total_affiliations if total_affiliations > 0 else 1.0
-            r += iou_affiliations
+            affiliation_r += iou_affiliations
 
-        rewards.append(r)
+        if affiliation_n > 0:
+            affiliation_r /= affiliation_n
+        r += affiliation_r
+
+        # binary reward if perfect match
+        if r == 2:
+            rewards.append(1)
+        else:
+            rewards.append(0)
 
     return rewards

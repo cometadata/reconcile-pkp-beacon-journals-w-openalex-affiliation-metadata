@@ -11,6 +11,7 @@ from prompt import SYSTEM_PROMPT
 from reward import format_reward, answer_reward
 
 assert load_dotenv(), "Failed to load environment variables from .env file."
+MAX_PROMPT_LEN = 16_000
 
 def parse_args():
     parser = ArgumentParser(description="Train a GRPO model on the arXiv affiliation dataset.")
@@ -61,21 +62,25 @@ def main():
                 },
                 {
                     "role": "user",
-                    "content": tokenizer.decode(tokenizer(x["pdf_content"], truncation=True, max_length=6_000).input_ids, skip_special_tokens=True),
+                    "content": x["pdf_content"],
                 },
             ],
             "answer": x['authors'],
         },
         remove_columns=["doi", "title", "authors", "filename", "pdf_content"],
+        num_proc=16,
     )
-    # dataset.save_to_disk('data/arxiv_author_affiliations_chat_16k')
+    print(f'Original dataset size: {len(dataset)}')
+    dataset = dataset.filter(
+        lambda x: len(tokenizer(x["prompt"], truncation=False)["input_ids"]) < MAX_PROMPT_LEN,
+        num_proc=16,
+    )
+    print(f'Filtered dataset size: {len(dataset)}')
 
     # lora
     lora_config = LoraConfig(
         r=8,
-        lora_alpha=16,
-        lora_dropout=0.01,
-        bias="none",
+        lora_alpha=32,
         task_type="CAUSAL_LM",
         target_modules=["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
     )
@@ -83,7 +88,7 @@ def main():
     model.print_trainable_parameters()
 
     # run
-    run_name = f'grpo-{args.model.split("/")[-1]}-lr{args.learning_rate}'
+    run_name = f'grpo-{args.model.split("/")[-1]}-lr{args.learning_rate}-filter'
     output_dir = Path(args.checkpoint_dir) / run_name
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -97,7 +102,7 @@ def main():
         lr_scheduler_type = "cosine",
         warmup_ratio = 0.03,
 
-        max_prompt_length = 7_000,
+        max_prompt_length = MAX_PROMPT_LEN,
         max_completion_length = 2_000,
 
         scale_rewards = False,
@@ -120,7 +125,7 @@ def main():
     )
 
     # start training
-    trainer.train("checkpoints/grpo-2025-08-11-14-43-Qwen3-4B/checkpoint-400")
+    trainer.train()
     trainer.save_model(output_dir / "final")
     tokenizer.save_pretrained(output_dir / "final")
 
