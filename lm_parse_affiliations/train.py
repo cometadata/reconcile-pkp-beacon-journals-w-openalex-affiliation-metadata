@@ -46,7 +46,6 @@ def main():
     # load model and tokenizer
     model = AutoModelForCausalLM.from_pretrained(
         args.model,
-        device_map="auto",
     )
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     tokenizer.pad_token = tokenizer.eos_token
