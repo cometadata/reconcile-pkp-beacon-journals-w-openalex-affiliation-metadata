@@ -19,8 +19,8 @@ def parse_args():
     parser.add_argument(
         "--model",
         type=str,
-        default="Qwen/Qwen3-4B",
-        help="The model to use for training. Default is Qwen/Qwen3-4B.",
+        default="Qwen/Qwen3-8B",
+        help="The model to use for training. Default is Qwen/Qwen3-8B.",
     )
 
     parser.add_argument(
@@ -102,7 +102,7 @@ def main():
         warmup_ratio = 0.03,
 
         max_prompt_length = MAX_PROMPT_LEN,
-        max_completion_length = 2_000,
+        max_completion_length = 8_000,
 
         scale_rewards = False,
         loss_type = "dr_grpo",
