@@ -44,11 +44,10 @@ def main():
     args = parse_args()
 
     # load model and tokenizer
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model,
-    )
+    # model = AutoModelForCausalLM.from_pretrained(
+    #     args.model,
+    # )
     tokenizer = AutoTokenizer.from_pretrained(args.model)
-    tokenizer.pad_token = tokenizer.eos_token
 
     # load dataset
     dataset = load_from_disk('data/arxiv_author_affiliations')
@@ -71,7 +70,7 @@ def main():
     )
     print(f'Original dataset size: {len(dataset)}')
     dataset = dataset.filter(
-        lambda x: len(tokenizer(x["prompt"], truncation=False)["input_ids"]) < MAX_PROMPT_LEN,
+        lambda x: len(tokenizer.apply_chat_template(x["prompt"], tokenize=True)) < MAX_PROMPT_LEN,
         num_proc=16,
     )
     print(f'Filtered dataset size: {len(dataset)}')
@@ -83,8 +82,8 @@ def main():
         task_type="CAUSAL_LM",
         target_modules=["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
     )
-    model = get_peft_model(model, lora_config)
-    model.print_trainable_parameters()
+    # model = get_peft_model(model, lora_config)
+    # model.print_trainable_parameters()
 
     # run
     run_name = f'grpo-{args.model.split("/")[-1]}-lr{args.learning_rate}-filter'
@@ -116,7 +115,8 @@ def main():
     )
 
     trainer = GRPOTrainer(
-        model=model,
+        model=args.model,
+        peft_config=lora_config,
         reward_funcs=[format_reward, answer_reward],
         args=config,
         train_dataset=dataset,
